@@ -45,32 +45,30 @@ Configuración del Backend
 
     Clona este repositorio:
 
-    bash
 
-git clone https://github.com/tu-usuario/myfinancepal.git
+```bash
+git clone https://github.com/aosadev/myfinancepal.git
 cd myfinancepal
-
+```
 Navega al directorio del backend y ejecuta el servidor Go:
 
-bash
-
-    cd backend
-    go run main.go
-
+```bash
+cd backend
+go run main.go
+```
 Configuración del Frontend
 
-    Navega al directorio del frontend e instala las dependencias:
+Navega al directorio del frontend e instala las dependencias:
 
-    bash
-
+```bash
 cd ../frontend
 npm install
-
+```
 Inicia la aplicación React:
 
-bash
-
-    npm start
+```bash
+npm start
+```
 
 Uso
 
