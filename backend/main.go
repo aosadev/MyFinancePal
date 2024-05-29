@@ -10,7 +10,7 @@ import (
     "strconv"
     "syscall"
     "time"
-
+    "github.com/dgrijalva/jwt-go"
     "github.com/gorilla/mux"
     _ "github.com/mattn/go-sqlite3"
     "golang.org/x/crypto/bcrypt"
