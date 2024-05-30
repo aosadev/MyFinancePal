@@ -1,7 +1,10 @@
 package main
 
 import (
+    "context"
+    "crypto/rand"
     "database/sql"
+    "encoding/base64"
     "encoding/json"
     "log"
     "net/http"
@@ -10,11 +13,21 @@ import (
     "strconv"
     "syscall"
     "time"
+
     "github.com/dgrijalva/jwt-go"
     "github.com/gorilla/mux"
     _ "github.com/mattn/go-sqlite3"
     "golang.org/x/crypto/bcrypt"
 )
+
+// Clave secreta para firmar los tokens JWT
+var jwtKey []byte
+
+// Estructura de los reclamos (claims) del token JWT
+type Claims struct {
+    Email string `json:"email"`
+    jwt.StandardClaims
+}
 
 var db *sql.DB
 
@@ -25,7 +38,6 @@ func initDB() {
         log.Fatal(err)
     }
 
-    // Crea la tabla de transacciones si no existe
     createTransactionTable := `CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         type TEXT,
@@ -37,7 +49,6 @@ func initDB() {
         log.Fatal(err)
     }
 
-    // Crea la tabla de usuarios si no existe
     createUserTable := `CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
@@ -49,7 +60,6 @@ func initDB() {
         log.Fatal(err)
     }
 
-    // Crea la tabla de categorías si no existe
     createCategoryTable := `CREATE TABLE IF NOT EXISTS categories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE
@@ -60,10 +70,25 @@ func initDB() {
     }
 }
 
+func generateKey() (string, error) {
+    key := make([]byte, 32)
+    if _, err := rand.Read(key); err != nil {
+        return "", err
+    }
+    return base64.StdEncoding.EncodeToString(key), nil
+}
+
 func main() {
+    // Generar una clave JWT al iniciar la aplicación
+    keyString, err := generateKey()
+    if err != nil {
+        log.Fatal("Error generating JWT key:", err)
+    }
+    jwtKey = []byte(keyString)
+    log.Println("Generated JWT key:", keyString)
+
     initDB()
 
-    // Cerrar la base de datos cuando la aplicación termina
     go func() {
         sigs := make(chan os.Signal, 1)
         signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -74,28 +99,25 @@ func main() {
 
     router := mux.NewRouter()
 
-	// Rutas para transacciones	
     router.HandleFunc("/transactions", getTransactions).Methods("GET")
     router.HandleFunc("/transaction/{id}", getTransaction).Methods("GET")
     router.HandleFunc("/transaction", createTransaction).Methods("POST")
     router.HandleFunc("/transaction/{id}", updateTransaction).Methods("PUT")
     router.HandleFunc("/transaction/{id}", deleteTransaction).Methods("DELETE")
 
-	// Rutas para usuarios
-	router.HandleFunc("/user", createUser).Methods("POST")
-	router.HandleFunc("/user/{id}", deleteUser).Methods("DELETE")
-	router.HandleFunc("/user/{id}", updateUser).Methods("PUT")
-	router.HandleFunc("/user/{id}/password", updateUserPassword).Methods("PUT")
-	router.HandleFunc("/user/checkpassword", checkPassword).Methods("POST")
+    router.HandleFunc("/user", createUser).Methods("POST")
+    router.HandleFunc("/user/{id}", deleteUser).Methods("DELETE")
+    router.HandleFunc("/user/{id}", updateUser).Methods("PUT")
+    router.HandleFunc("/user/{id}/password", updateUserPassword).Methods("PUT")
+    router.HandleFunc("/user/checkpassword", checkPassword).Methods("POST")
 
-    // Iniciar el servidor
     log.Fatal(http.ListenAndServe(":8080", router))
 }
 
 // Transaction define la estructura de una transacción
 type Transaction struct {
     ID        int       `json:"id"`
-    Type      string    `json:"type"` // "income" para ingresos, "expense" para gastos
+    Type      string    `json:"type"`
     Amount    float64   `json:"amount"`
     Timestamp time.Time `json:"timestamp"`
 }
@@ -108,23 +130,10 @@ type User struct {
     Password string `json:"password"`
 }
 
-// getTransactions maneja solicitudes GET para "/transactions" endpoint.
-// Esta función consulta la base de datos para recuperar todas las transacciones almacenadas y
-// las devuelve en formato JSON.
-//
-// Parámetros:
-//   - w http.ResponseWriter: Utilizado para escribir la respuesta HTTP.
-//   - r *http.Request: Contiene detalles de la solicitud HTTP. No se usa directamente en esta función.
-//
-// Respuesta:
-//   - Si hay transacciones, se devuelven como un array de objetos JSON.
-//   - Si no hay transacciones, devuelve un array vacío en formato JSON.
-//   - Si ocurre un error durante la consulta o la codificación de las transacciones,
-//     se devuelve un error HTTP 500 (Internal Server Error).
+// getTransactions maneja GET para listar todas las transacciones
 func getTransactions(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
 
-    // Realizar la consulta a la base de datos para obtener todas las transacciones
     rows, err := db.Query("SELECT id, type, amount, timestamp FROM transactions")
     if err != nil {
         log.Printf("Error querying transactions: %v", err)
@@ -144,21 +153,23 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
         transactions = append(transactions, t)
     }
 
-    // Verificar si no hay transacciones
+    if err := rows.Err(); err != nil {
+        log.Printf("Error with rows: %v", err)
+        http.Error(w, "Error reading transactions", http.StatusInternalServerError)
+        return
+    }
+
     if len(transactions) == 0 {
         w.WriteHeader(http.StatusOK)
         w.Write([]byte("[]"))
         return
     }
 
-    // Codificar las transacciones en JSON y enviar la respuesta
     if err := json.NewEncoder(w).Encode(transactions); err != nil {
         log.Printf("Error encoding transactions: %v", err)
         http.Error(w, "Error encoding transactions", http.StatusInternalServerError)
     }
 }
-
-
 
 // getTransaction maneja GET para obtener una transacción específica por ID
 func getTransaction(w http.ResponseWriter, r *http.Request) {
@@ -183,17 +194,14 @@ func getTransaction(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(t)
 }
 
-
 // createTransaction maneja POST para crear una nueva transacción
 func createTransaction(w http.ResponseWriter, r *http.Request) {
     var transaction Transaction
-    // Decodificar el cuerpo de la solicitud para obtener los datos de la transacción
     if err := json.NewDecoder(r.Body).Decode(&transaction); err != nil {
         http.Error(w, err.Error(), http.StatusBadRequest)
         return
     }
 
-    // Preparar y ejecutar la consulta SQL para insertar la transacción
     stmt, err := db.Prepare("INSERT INTO transactions (type, amount, timestamp) VALUES (?, ?, ?)")
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -201,7 +209,6 @@ func createTransaction(w http.ResponseWriter, r *http.Request) {
     }
     defer stmt.Close()
 
-    // Asegurarse de que la marca de tiempo es la actual
     transaction.Timestamp = time.Now()
     result, err := stmt.Exec(transaction.Type, transaction.Amount, transaction.Timestamp)
     if err != nil {
@@ -209,19 +216,17 @@ func createTransaction(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-	lastInsertId, err := result.LastInsertId()
+    lastInsertId, err := result.LastInsertId()
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
     }
     transaction.ID = int(lastInsertId)
 
-    // Establecer el tipo de contenido y devolver la transacción creada
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(http.StatusCreated)
     json.NewEncoder(w).Encode(transaction)
 }
-
 
 // updateTransaction maneja PUT para actualizar una transacción existente
 func updateTransaction(w http.ResponseWriter, r *http.Request) {
@@ -233,13 +238,11 @@ func updateTransaction(w http.ResponseWriter, r *http.Request) {
     }
 
     var transaction Transaction
-    // Decodificar el cuerpo de la solicitud para obtener los nuevos datos de la transacción
     if err := json.NewDecoder(r.Body).Decode(&transaction); err != nil {
         http.Error(w, err.Error(), http.StatusBadRequest)
         return
     }
 
-    // Preparar y ejecutar la consulta SQL para actualizar la transacción
     stmt, err := db.Prepare("UPDATE transactions SET type = ?, amount = ?, timestamp = ? WHERE id = ?")
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -247,7 +250,7 @@ func updateTransaction(w http.ResponseWriter, r *http.Request) {
     }
     defer stmt.Close()
 
-    // Actualizar la marca de tiempo a la hora actual
+    transaction.ID = id
     transaction.Timestamp = time.Now()
     _, err = stmt.Exec(transaction.Type, transaction.Amount, transaction.Timestamp, id)
     if err != nil {
@@ -255,12 +258,10 @@ func updateTransaction(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Establecer el ID de la transacción y devolver la transacción actualizada
-    transaction.ID = id
     w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(transaction)
 }
-
 
 // deleteTransaction maneja DELETE para eliminar una transacción
 func deleteTransaction(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +272,14 @@ func deleteTransaction(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    _, err = db.Exec("DELETE FROM transactions WHERE id = ?", id)
+    stmt, err := db.Prepare("DELETE FROM transactions WHERE id = ?")
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+    defer stmt.Close()
+
+    _, err = stmt.Exec(id)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -280,20 +288,19 @@ func deleteTransaction(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusNoContent)
 }
 
-
+// createUser maneja POST para crear un nuevo usuario
 func createUser(w http.ResponseWriter, r *http.Request) {
     var user User
-    err := json.NewDecoder(r.Body).Decode(&user)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
+    if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+        http.Error(w, "Invalid request payload", http.StatusBadRequest)
         return
     }
 
-	// Validar que el nombre de usuario, el correo electrónico y la contraseña no estén vacíos
-	if user.Username == "" || user.Email == "" || user.Password == "" {
-		http.Error(w, "Username, email, and password are required", http.StatusBadRequest)
-		return
-	}
+    // Validar que el nombre de usuario, el correo electrónico y la contraseña no estén vacíos
+    if user.Username == "" || user.Email == "" || user.Password == "" {
+        http.Error(w, "Username, email, and password are required", http.StatusBadRequest)
+        return
+    }
 
     hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
     if err != nil {
@@ -318,14 +325,14 @@ func createUser(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte("Usuario creado"))
 }
 
+// updateUser maneja PUT para actualizar un usuario existente
 func updateUser(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id := params["id"]
 
     var user User
-    err := json.NewDecoder(r.Body).Decode(&user)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
+    if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+        http.Error(w, "Invalid request payload", http.StatusBadRequest)
         return
     }
 
@@ -346,6 +353,43 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(user)
 }
 
+// updateUserPassword maneja PUT para actualizar la contraseña de un usuario
+func updateUserPassword(w http.ResponseWriter, r *http.Request) {
+    params := mux.Vars(r)
+    id := params["id"]
+
+    var payload struct {
+        Password string `json:"password"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+        http.Error(w, "Invalid request payload", http.StatusBadRequest)
+        return
+    }
+
+    hashedPassword, err := bcrypt.GenerateFromPassword([]byte(payload.Password), bcrypt.DefaultCost)
+    if err != nil {
+        http.Error(w, "Error hashing password", http.StatusInternalServerError)
+        return
+    }
+
+    stmt, err := db.Prepare("UPDATE users SET password = ? WHERE id = ?")
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+    defer stmt.Close()
+
+    _, err = stmt.Exec(string(hashedPassword), id)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte("Password updated"))
+}
+
+// deleteUser maneja DELETE para eliminar un usuario
 func deleteUser(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id := params["id"]
@@ -366,19 +410,20 @@ func deleteUser(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusNoContent)
 }
 
+// checkPassword maneja POST para verificar la contraseña y generar un token JWT si es correcta
 func checkPassword(w http.ResponseWriter, r *http.Request) {
     var credentials struct {
-        Email    string
-        Password string
+        Email    string `json:"email"`
+        Password string `json:"password"`
     }
-    err := json.NewDecoder(r.Body).Decode(&credentials)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
+    if err := json.NewDecoder(r.Body).Decode(&credentials); err != nil {
+        http.Error(w, "Invalid request payload", http.StatusBadRequest)
         return
     }
 
     var hashedPassword string
-    err = db.QueryRow("SELECT password FROM users WHERE email = ?", credentials.Email).Scan(&hashedPassword)
+    var user User
+    err := db.QueryRow("SELECT id, username, email, password FROM users WHERE email = ?", credentials.Email).Scan(&user.ID, &user.Username, &user.Email, &hashedPassword)
     if err != nil {
         http.Error(w, "User not found", http.StatusNotFound)
         return
@@ -390,42 +435,49 @@ func checkPassword(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte("Login successful"))
+    expirationTime := time.Now().Add(24 * time.Hour) // Token expira en 24 horas
+    claims := &Claims{
+        Email: credentials.Email,
+        StandardClaims: jwt.StandardClaims{
+            ExpiresAt: expirationTime.Unix(),
+        },
+    }
+
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    tokenString, err := token.SignedString(jwtKey)
+    if err != nil {
+        http.Error(w, "Error generating token", http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{
+        "token": tokenString,
+    })
 }
 
-// updateUserPassword maneja PUT para actualizar la contraseña de un usuario
-func updateUserPassword(w http.ResponseWriter, r *http.Request) {
-    params := mux.Vars(r)
-    id := params["id"]
+// Middleware para verificar el token JWT
+func jwtMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        tokenStr := r.Header.Get("Authorization")
+        if tokenStr == "" {
+            http.Error(w, "Missing token", http.StatusUnauthorized)
+            return
+        }
 
-    var req struct {
-        Password string `json:"password"`
-    }
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
-        return
-    }
+        claims := &Claims{}
+        token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
+            return jwtKey, nil
+        })
 
-    hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-    if err != nil {
-        http.Error(w, "Error hashing password", http.StatusInternalServerError)
-        return
-    }
+        if err != nil || !token.Valid {
+            http.Error(w, "Invalid token", http.StatusUnauthorized)
+            return
+        }
 
-    stmt, err := db.Prepare("UPDATE users SET password = ? WHERE id = ?")
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-    defer stmt.Close()
-
-    _, err = stmt.Exec(hashedPassword, id)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte("Password updated successfully"))
+        ctx := context.WithValue(r.Context(), "user", claims.Email)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
 }
+
+
