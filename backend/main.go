@@ -7,10 +7,13 @@ import (
     "encoding/base64"
     "encoding/json"
     "log"
+    "net"
     "net/http"
     "os"
     "os/signal"
     "strconv"
+    "strings"
+    "sync"
     "syscall"
     "time"
 
@@ -27,6 +30,22 @@ var jwtKey []byte
 type Claims struct {
     Email string `json:"email"`
     jwt.StandardClaims
+}
+
+// Transaction define la estructura de una transacción
+type Transaction struct {
+    ID        int       `json:"id"`
+    Type      string    `json:"type"`
+    Amount    float64   `json:"amount"`
+    Timestamp time.Time `json:"timestamp"`
+}
+
+// User define la estructura de un usuario
+type User struct {
+    ID       int    `json:"id"`
+    Username string `json:"username"`
+    Email    string `json:"email"`
+    Password string `json:"password"`
 }
 
 var db *sql.DB
@@ -99,38 +118,141 @@ func main() {
 
     router := mux.NewRouter()
 
-    router.HandleFunc("/transactions", getTransactions).Methods("GET")
-    router.HandleFunc("/transaction/{id}", getTransaction).Methods("GET")
-    router.HandleFunc("/transaction", createTransaction).Methods("POST")
-    router.HandleFunc("/transaction/{id}", updateTransaction).Methods("PUT")
-    router.HandleFunc("/transaction/{id}", deleteTransaction).Methods("DELETE")
+     // Crear subrutas para las rutas que requieren el middleware de API key y rate limiting
+    openRoutes := router.NewRoute().Subrouter()
+    openRoutes.Use(apiKeyMiddleware)
+    openRoutes.Use(rateLimitMiddleware)
+    openRoutes.HandleFunc("/user", createUser).Methods("POST")
+    openRoutes.HandleFunc("/user/checkpassword", checkPassword).Methods("POST")
 
-    router.HandleFunc("/user", createUser).Methods("POST")
-    router.HandleFunc("/user/{id}", deleteUser).Methods("DELETE")
-    router.HandleFunc("/user/{id}", updateUser).Methods("PUT")
-    router.HandleFunc("/user/{id}/password", updateUserPassword).Methods("PUT")
-    router.HandleFunc("/user/checkpassword", checkPassword).Methods("POST")
+    apiRouter := router.PathPrefix("/api").Subrouter()
+    apiRouter.Use(jwtMiddleware)
+
+    apiRouter.HandleFunc("/transactions", getTransactions).Methods("GET")
+    apiRouter.HandleFunc("/transaction/{id}", getTransaction).Methods("GET")
+    apiRouter.HandleFunc("/transaction", createTransaction).Methods("POST")
+    apiRouter.HandleFunc("/transaction/{id}", updateTransaction).Methods("PUT")
+    apiRouter.HandleFunc("/transaction/{id}", deleteTransaction).Methods("DELETE")
+    apiRouter.HandleFunc("/user/{id}", deleteUser).Methods("DELETE")
+    apiRouter.HandleFunc("/user/{id}", updateUser).Methods("PUT")
+    apiRouter.HandleFunc("/user/{id}/password", updateUserPassword).Methods("PUT")
+
 
     log.Fatal(http.ListenAndServe(":8080", router))
 }
 
-// Transaction define la estructura de una transacción
-type Transaction struct {
-    ID        int       `json:"id"`
-    Type      string    `json:"type"`
-    Amount    float64   `json:"amount"`
-    Timestamp time.Time `json:"timestamp"`
+// Middleware para verificar la API key
+const apiKey = "Ce92Xz0N9dTMbe80MbCWPqJArR/i+aWtLAda9/2eaz4="
+
+func apiKeyMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        key := r.Header.Get("X-API-KEY")
+        if key != apiKey {
+            http.Error(w, "Unauthorized", http.StatusUnauthorized)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
 }
 
-// User define la estructura de un usuario
-type User struct {
-    ID       int    `json:"id"`
-    Username string `json:"username"`
-    Email    string `json:"email"`
-    Password string `json:"password"`
+// Middleware para la limitación de tasa (rate limiting)
+var visitors = make(map[string]*Visitor)
+var mu sync.Mutex
+
+type Visitor struct {
+    lastSeen time.Time
+    requests int
 }
 
-// getTransactions maneja GET para listar todas las transacciones
+func getVisitor(ip string) *Visitor {
+    mu.Lock()
+    defer mu.Unlock()
+    v, exists := visitors[ip]
+    if !exists {
+        v = &Visitor{lastSeen: time.Now(), requests: 1}
+        visitors[ip] = v
+    } else {
+        v.requests++
+        v.lastSeen = time.Now()
+    }
+    return v
+}
+
+func cleanupVisitors() {
+    for {
+        time.Sleep(time.Minute)
+        mu.Lock()
+        for ip, v := range visitors {
+            if time.Since(v.lastSeen) > 1*time.Minute {
+                delete(visitors, ip)
+            }
+        }
+        mu.Unlock()
+    }
+}
+
+func rateLimitMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ip, _, err := net.SplitHostPort(r.RemoteAddr)
+        if err != nil {
+            // Intenta extraer la IP de la cabecera X-Forwarded-For o X-Real-IP si está presente
+            ip = r.Header.Get("X-Forwarded-For")
+            if ip == "" {
+                ip = r.Header.Get("X-Real-IP")
+            }
+            if ip == "" {
+                // Si no se encuentra, usar una IP de respaldo
+                ip = "127.0.0.1"
+            }
+        }
+
+        visitor := getVisitor(ip)
+        if visitor.requests > 10 {
+            http.Error(w, "Too many requests", http.StatusTooManyRequests)
+            return
+        }
+
+        next.ServeHTTP(w, r)
+    })
+}
+
+
+
+func init() {
+    go cleanupVisitors()
+}
+
+// Middleware para verificar el token JWT
+func jwtMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        authHeader := r.Header.Get("Authorization")
+        if authHeader == "" {
+            http.Error(w, "Authorization header is required", http.StatusUnauthorized)
+            return
+        }
+
+        tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+        if tokenStr == authHeader {
+            http.Error(w, "Bearer token not found", http.StatusUnauthorized)
+            return
+        }
+
+        claims := &Claims{}
+        token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
+            return jwtKey, nil
+        })
+
+        if err != nil || !token.Valid {
+            http.Error(w, "Invalid token", http.StatusUnauthorized)
+            return
+        }
+
+        ctx := context.WithValue(r.Context(), "user", claims.Email)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+
+// Funciones del controlador para las transacciones y usuarios (sin cambios)
 func getTransactions(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
 
@@ -171,7 +293,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-// getTransaction maneja GET para obtener una transacción específica por ID
 func getTransaction(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id, err := strconv.Atoi(params["id"])
@@ -194,7 +315,6 @@ func getTransaction(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(t)
 }
 
-// createTransaction maneja POST para crear una nueva transacción
 func createTransaction(w http.ResponseWriter, r *http.Request) {
     var transaction Transaction
     if err := json.NewDecoder(r.Body).Decode(&transaction); err != nil {
@@ -228,7 +348,6 @@ func createTransaction(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(transaction)
 }
 
-// updateTransaction maneja PUT para actualizar una transacción existente
 func updateTransaction(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id, err := strconv.Atoi(params["id"])
@@ -263,7 +382,6 @@ func updateTransaction(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(transaction)
 }
 
-// deleteTransaction maneja DELETE para eliminar una transacción
 func deleteTransaction(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id, err := strconv.Atoi(params["id"])
@@ -288,7 +406,6 @@ func deleteTransaction(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusNoContent)
 }
 
-// createUser maneja POST para crear un nuevo usuario
 func createUser(w http.ResponseWriter, r *http.Request) {
     var user User
     if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
@@ -296,7 +413,6 @@ func createUser(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Validar que el nombre de usuario, el correo electrónico y la contraseña no estén vacíos
     if user.Username == "" || user.Email == "" || user.Password == "" {
         http.Error(w, "Username, email, and password are required", http.StatusBadRequest)
         return
@@ -325,7 +441,6 @@ func createUser(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte("Usuario creado"))
 }
 
-// updateUser maneja PUT para actualizar un usuario existente
 func updateUser(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id := params["id"]
@@ -353,7 +468,6 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(user)
 }
 
-// updateUserPassword maneja PUT para actualizar la contraseña de un usuario
 func updateUserPassword(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id := params["id"]
@@ -389,7 +503,6 @@ func updateUserPassword(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte("Password updated"))
 }
 
-// deleteUser maneja DELETE para eliminar un usuario
 func deleteUser(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id := params["id"]
@@ -410,7 +523,6 @@ func deleteUser(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusNoContent)
 }
 
-// checkPassword maneja POST para verificar la contraseña y generar un token JWT si es correcta
 func checkPassword(w http.ResponseWriter, r *http.Request) {
     var credentials struct {
         Email    string `json:"email"`
@@ -435,7 +547,7 @@ func checkPassword(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    expirationTime := time.Now().Add(24 * time.Hour) // Token expira en 24 horas
+    expirationTime := time.Now().Add(24 * time.Hour)
     claims := &Claims{
         Email: credentials.Email,
         StandardClaims: jwt.StandardClaims{
@@ -455,29 +567,3 @@ func checkPassword(w http.ResponseWriter, r *http.Request) {
         "token": tokenString,
     })
 }
-
-// Middleware para verificar el token JWT
-func jwtMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        tokenStr := r.Header.Get("Authorization")
-        if tokenStr == "" {
-            http.Error(w, "Missing token", http.StatusUnauthorized)
-            return
-        }
-
-        claims := &Claims{}
-        token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
-            return jwtKey, nil
-        })
-
-        if err != nil || !token.Valid {
-            http.Error(w, "Invalid token", http.StatusUnauthorized)
-            return
-        }
-
-        ctx := context.WithValue(r.Context(), "user", claims.Email)
-        next.ServeHTTP(w, r.WithContext(ctx))
-    })
-}
-
-
