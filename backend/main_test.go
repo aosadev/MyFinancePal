@@ -164,8 +164,15 @@ func TestCreateTransaction(t *testing.T) {
     router.HandleFunc("/api/transaction", createTransaction).Methods("POST")
 
     transaction := Transaction{
-        Type:   "income",
-        Amount: 1000.50,
+        Type:          "income",
+        Amount:        1000.50,
+        Description:   "Salary",
+        Category:      "Income",
+        Currency:      "USD",
+        PaymentMethod: "Bank Transfer",
+        Merchant:      "Company XYZ",
+        Recurring:     false,
+        Tags:          "salary,monthly",
     }
     payload, _ := json.Marshal(transaction)
     req, _ := http.NewRequest("POST", "/api/transaction", bytes.NewBuffer(payload))
@@ -192,8 +199,8 @@ func TestGetTransactions(t *testing.T) {
     db = initTestDB() // use test database
     defer db.Close()
 
-    stmt, _ := db.Prepare("INSERT INTO transactions (type, amount, timestamp) VALUES (?, ?, ?)")
-    stmt.Exec("income", 1000.50, time.Now())
+    stmt, _ := db.Prepare("INSERT INTO transactions (type, amount, timestamp, description, category, currency, payment_method, merchant, recurring, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    stmt.Exec("income", 1000.50, time.Now(), "Salary", "Income", "USD", "Bank Transfer", "Company XYZ", false, "salary,monthly")
 
     token := generateTestJWT("john@example.com")
 
@@ -224,8 +231,8 @@ func TestGetTransaction(t *testing.T) {
     db = initTestDB() // use test database
     defer db.Close()
 
-    stmt, _ := db.Prepare("INSERT INTO transactions (type, amount, timestamp) VALUES (?, ?, ?)")
-    result, _ := stmt.Exec("income", 1000.50, time.Now())
+    stmt, _ := db.Prepare("INSERT INTO transactions (type, amount, timestamp, description, category, currency, payment_method, merchant, recurring, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    result, _ := stmt.Exec("income", 1000.50, time.Now(), "Salary", "Income", "USD", "Bank Transfer", "Company XYZ", false, "salary,monthly")
     lastInsertId, _ := result.LastInsertId()
 
     token := generateTestJWT("john@example.com")
@@ -257,8 +264,8 @@ func TestUpdateTransaction(t *testing.T) {
     db = initTestDB() // use test database
     defer db.Close()
 
-    stmt, _ := db.Prepare("INSERT INTO transactions (type, amount, timestamp) VALUES (?, ?, ?)")
-    result, _ := stmt.Exec("income", 1000.50, time.Now())
+    stmt, _ := db.Prepare("INSERT INTO transactions (type, amount, timestamp, description, category, currency, payment_method, merchant, recurring, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    result, _ := stmt.Exec("income", 1000.50, time.Now(), "Salary", "Income", "USD", "Bank Transfer", "Company XYZ", false, "salary,monthly")
     lastInsertId, _ := result.LastInsertId()
 
     token := generateTestJWT("john@example.com")
@@ -268,8 +275,15 @@ func TestUpdateTransaction(t *testing.T) {
     router.HandleFunc("/api/transaction/{id}", updateTransaction).Methods("PUT")
 
     updatedTransaction := Transaction{
-        Type:   "expense",
-        Amount: 500.25,
+        Type:          "expense",
+        Amount:        500.25,
+        Description:   "Dinner",
+        Category:      "Food",
+        Currency:      "USD",
+        PaymentMethod: "Credit Card",
+        Merchant:      "Restaurant ABC",
+        Recurring:     false,
+        Tags:          "dinner,food",
     }
     payload, _ := json.Marshal(updatedTransaction)
     req, _ := http.NewRequest("PUT", "/api/transaction/"+strconv.Itoa(int(lastInsertId)), bytes.NewBuffer(payload))
@@ -296,8 +310,8 @@ func TestDeleteTransaction(t *testing.T) {
     db = initTestDB() // use test database
     defer db.Close()
 
-    stmt, _ := db.Prepare("INSERT INTO transactions (type, amount, timestamp) VALUES (?, ?, ?)")
-    result, _ := stmt.Exec("income", 1000.50, time.Now())
+    stmt, _ := db.Prepare("INSERT INTO transactions (type, amount, timestamp, description, category, currency, payment_method, merchant, recurring, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    result, _ := stmt.Exec("income", 1000.50, time.Now(), "Salary", "Income", "USD", "Bank Transfer", "Company XYZ", false, "salary,monthly")
     lastInsertId, _ := result.LastInsertId()
 
     token := generateTestJWT("john@example.com")
@@ -323,3 +337,4 @@ func TestDeleteTransaction(t *testing.T) {
         t.Errorf("Expected transaction to be deleted, but it still exists")
     }
 }
+
