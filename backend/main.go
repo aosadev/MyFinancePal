@@ -32,18 +32,18 @@ type Claims struct {
     jwt.StandardClaims
 }
 
+// Transaction define la estructura de una transacción
 type Transaction struct {
-    ID            int       `json:"id"`
-    Type          string    `json:"type"`
-    Amount        float64   `json:"amount"`
-    Timestamp     time.Time `json:"timestamp"`
-    Description   string    `json:"description"`
-    Category      string    `json:"category"`
-    Currency      string    `json:"currency"`
-    PaymentMethod string    `json:"payment_method"`
-    Merchant      string    `json:"merchant"`
-    Recurring     bool      `json:"recurring"`
-    Tags          string    `json:"tags"`
+    ID          int       `json:"id"`
+    Type        string    `json:"type"`
+    Amount      float64   `json:"amount"`
+    Timestamp   time.Time `json:"timestamp"`
+    Description string    `json:"description"`
+    Currency    string    `json:"currency"`
+    Method      string    `json:"method"`
+    Vendor      string    `json:"vendor"`
+    Recurring   bool      `json:"recurring"`
+    Tags        string    `json:"tags"`
 }
 
 // User define la estructura de un usuario
@@ -69,10 +69,9 @@ func initDB() {
         amount REAL,
         timestamp DATETIME,
         description TEXT,
-        category TEXT,
         currency TEXT,
-        payment_method TEXT,
-        merchant TEXT,
+        method TEXT,
+        vendor TEXT,
         recurring BOOLEAN,
         tags TEXT
     );`
@@ -91,17 +90,7 @@ func initDB() {
     if err != nil {
         log.Fatal(err)
     }
-
-    createCategoryTable := `CREATE TABLE IF NOT EXISTS categories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE
-    );`
-    _, err = db.Exec(createCategoryTable)
-    if err != nil {
-        log.Fatal(err)
-    }
 }
-
 
 func generateKey() (string, error) {
     key := make([]byte, 32)
@@ -132,7 +121,10 @@ func main() {
 
     router := mux.NewRouter()
 
-     // Crear subrutas para las rutas que requieren el middleware de API key y rate limiting
+    // Middleware CORS
+    router.Use(corsMiddleware)
+
+    // Crear subrutas para las rutas que requieren el middleware de API key y rate limiting
     openRoutes := router.NewRoute().Subrouter()
     openRoutes.Use(apiKeyMiddleware)
     openRoutes.Use(rateLimitMiddleware)
@@ -150,7 +142,6 @@ func main() {
     apiRouter.HandleFunc("/user/{id}", deleteUser).Methods("DELETE")
     apiRouter.HandleFunc("/user/{id}", updateUser).Methods("PUT")
     apiRouter.HandleFunc("/user/{id}/password", updateUserPassword).Methods("PUT")
-
 
     log.Fatal(http.ListenAndServe(":8080", router))
 }
@@ -209,15 +200,8 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         ip, _, err := net.SplitHostPort(r.RemoteAddr)
         if err != nil {
-            // Intenta extraer la IP de la cabecera X-Forwarded-For o X-Real-IP si está presente
-            ip = r.Header.Get("X-Forwarded-For")
-            if ip == "" {
-                ip = r.Header.Get("X-Real-IP")
-            }
-            if ip == "" {
-                // Si no se encuentra, usar una IP de respaldo
-                ip = "127.0.0.1"
-            }
+            http.Error(w, "Unable to parse IP", http.StatusInternalServerError)
+            return
         }
 
         visitor := getVisitor(ip)
@@ -230,10 +214,21 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
     })
 }
 
-
-
 func init() {
     go cleanupVisitors()
+}
+
+// Middleware CORS
+func corsMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Access-Control-Allow-Origin", "*")
+        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-KEY")
+        if r.Method == http.MethodOptions {
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
 }
 
 // Middleware para verificar el token JWT
@@ -266,11 +261,11 @@ func jwtMiddleware(next http.Handler) http.Handler {
     })
 }
 
-// Funciones del controlador para las transacciones y usuarios (sin cambios)
+// Funciones del controlador para las transacciones y usuarios
 func getTransactions(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
 
-    rows, err := db.Query("SELECT id, type, amount, timestamp, description, category, currency, payment_method, merchant, recurring, tags FROM transactions")
+    rows, err := db.Query("SELECT id, type, amount, timestamp, description, currency, method, vendor, recurring, tags FROM transactions")
     if err != nil {
         log.Printf("Error querying transactions: %v", err)
         http.Error(w, "Error querying database", http.StatusInternalServerError)
@@ -281,7 +276,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
     var transactions []Transaction
     for rows.Next() {
         var t Transaction
-        if err := rows.Scan(&t.ID, &t.Type, &t.Amount, &t.Timestamp, &t.Description, &t.Category, &t.Currency, &t.PaymentMethod, &t.Merchant, &t.Recurring, &t.Tags); err != nil {
+        if err := rows.Scan(&t.ID, &t.Type, &t.Amount, &t.Timestamp, &t.Description, &t.Currency, &t.Method, &t.Vendor, &t.Recurring, &t.Tags); err != nil {
             log.Printf("Error scanning transaction: %v", err)
             http.Error(w, "Error reading transactions", http.StatusInternalServerError)
             return
@@ -307,7 +302,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-
 func getTransaction(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id, err := strconv.Atoi(params["id"])
@@ -318,7 +312,7 @@ func getTransaction(w http.ResponseWriter, r *http.Request) {
 
     w.Header().Set("Content-Type", "application/json")
     var t Transaction
-    err = db.QueryRow("SELECT id, type, amount, timestamp, description, category, currency, payment_method, merchant, recurring, tags FROM transactions WHERE id = ?", id).Scan(&t.ID, &t.Type, &t.Amount, &t.Timestamp, &t.Description, &t.Category, &t.Currency, &t.PaymentMethod, &t.Merchant, &t.Recurring, &t.Tags)
+    err = db.QueryRow("SELECT id, type, amount, timestamp, description, currency, method, vendor, recurring, tags FROM transactions WHERE id = ?", id).Scan(&t.ID, &t.Type, &t.Amount, &t.Timestamp, &t.Description, &t.Currency, &t.Method, &t.Vendor, &t.Recurring, &t.Tags)
     if err != nil {
         if err == sql.ErrNoRows {
             http.NotFound(w, r)
@@ -330,7 +324,6 @@ func getTransaction(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(t)
 }
 
-
 func createTransaction(w http.ResponseWriter, r *http.Request) {
     var transaction Transaction
     if err := json.NewDecoder(r.Body).Decode(&transaction); err != nil {
@@ -338,7 +331,7 @@ func createTransaction(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    stmt, err := db.Prepare("INSERT INTO transactions (type, amount, timestamp, description, category, currency, payment_method, merchant, recurring, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    stmt, err := db.Prepare("INSERT INTO transactions (type, amount, timestamp, description, currency, method, vendor, recurring, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -346,7 +339,7 @@ func createTransaction(w http.ResponseWriter, r *http.Request) {
     defer stmt.Close()
 
     transaction.Timestamp = time.Now()
-    result, err := stmt.Exec(transaction.Type, transaction.Amount, transaction.Timestamp, transaction.Description, transaction.Category, transaction.Currency, transaction.PaymentMethod, transaction.Merchant, transaction.Recurring, transaction.Tags)
+    result, err := stmt.Exec(transaction.Type, transaction.Amount, transaction.Timestamp, transaction.Description, transaction.Currency, transaction.Method, transaction.Vendor, transaction.Recurring, transaction.Tags)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -364,7 +357,6 @@ func createTransaction(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(transaction)
 }
 
-
 func updateTransaction(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
     id, err := strconv.Atoi(params["id"])
@@ -379,7 +371,7 @@ func updateTransaction(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    stmt, err := db.Prepare("UPDATE transactions SET type = ?, amount = ?, timestamp = ?, description = ?, category = ?, currency = ?, payment_method = ?, merchant = ?, recurring = ?, tags = ? WHERE id = ?")
+    stmt, err := db.Prepare("UPDATE transactions SET type = ?, amount = ?, timestamp = ?, description = ?, currency = ?, method = ?, vendor = ?, recurring = ?, tags = ? WHERE id = ?")
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -388,7 +380,7 @@ func updateTransaction(w http.ResponseWriter, r *http.Request) {
 
     transaction.ID = id
     transaction.Timestamp = time.Now()
-    _, err = stmt.Exec(transaction.Type, transaction.Amount, transaction.Timestamp, transaction.Description, transaction.Category, transaction.Currency, transaction.PaymentMethod, transaction.Merchant, transaction.Recurring, transaction.Tags, id)
+    _, err = stmt.Exec(transaction.Type, transaction.Amount, transaction.Timestamp, transaction.Description, transaction.Currency, transaction.Method, transaction.Vendor, transaction.Recurring, transaction.Tags, id)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -398,7 +390,6 @@ func updateTransaction(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(transaction)
 }
-
 
 func deleteTransaction(w http.ResponseWriter, r *http.Request) {
     params := mux.Vars(r)
