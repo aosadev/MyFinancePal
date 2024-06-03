@@ -1,0 +1,38 @@
+.transactions {
+  padding: 20px;
+}
+
+.transactions h1 {
+  text-align: center;
+}
+
+.transactions button {
+  margin-bottom: 20px;
+}
+
+.transactions table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.transactions th, .transactions td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+
+.transactions th {
+  background-color: #f2f2f2;
+}
+
+.transactions form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.transactions form input, .transactions form button {
+  padding: 10px;
+  font-size: 16px;
+}
